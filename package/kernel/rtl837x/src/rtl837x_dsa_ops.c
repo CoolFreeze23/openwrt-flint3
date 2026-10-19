@@ -1203,6 +1203,47 @@ static void rtl837x_stats_stop(struct rtk_gsw *gsw)
  * port's bridge-VID membership dropped while vlan_filtering is on (the tagger
  * does not use that VID in VLAN-aware mode), which is a separate change.
  */
+/* VLAN "transparency" from @igr_port: VLAN_PORT_EGR_TRANS (0x4EB8, three
+ * egress ports per register, a 10-bit ingress port mask each, written by
+ * dal_rtl8373_vlan_portTransparent_set()) lists, per egress port, the
+ * ingress ports whose frames skip the egress VLAN membership check there.
+ * It is the RTL8373 counterpart of the RTL8365MB register the upstream
+ * rtl8365mb driver uses for VLAN-unaware ports (VLAN_EGRESS_TRANSPARENT,
+ * 0x09D0, same SDK function name and arguments).
+ */
+static int rtl837x_set_transparent(struct rtk_gsw *gsw, int igr_port,
+				   bool enable)
+{
+	int egr_port, ret;
+
+	for (egr_port = 0; egr_port < RTK_MAX_NUM_OF_PORT; egr_port++) {
+		rtk_portmask_t pmsk = { 0 };
+		u32 old;
+
+		if (!rtl837x_valid_port(gsw, egr_port))
+			continue;
+
+		ret = rtk_vlan_transparent_get(egr_port, &pmsk);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		old = pmsk.bits[0];
+		if (enable)
+			pmsk.bits[0] |= BIT(igr_port);
+		else
+			pmsk.bits[0] &= ~BIT(igr_port);
+
+		if (pmsk.bits[0] == old)
+			continue;
+
+		ret = rtk_vlan_transparent_set(egr_port, &pmsk);
+		if (ret)
+			return rtl837x_to_errno(ret);
+	}
+
+	return 0;
+}
+
 static int rtl837x_set_ingress_policy(struct rtk_gsw *gsw, int port,
 				      bool vlan_filtering)
 {
@@ -1214,6 +1255,15 @@ static int rtl837x_set_ingress_policy(struct rtk_gsw *gsw, int port,
 		if (ret)
 			return rtl837x_to_errno(ret);
 
+		/* VLAN-aware: egress follows the VLAN table again. */
+		ret = rtl837x_set_transparent(gsw, port, false);
+		if (ret)
+			return ret;
+
+		ret = rtk_vlan_tagMode_set(port, VLAN_EGRESS_TAG_MODE_ORIGINAL);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
 		ret = rtk_vlan_portAcceptFrameType_set(port, ACCEPT_FRAME_TYPE_ALL);
 		if (ret)
 			return rtl837x_to_errno(ret);
@@ -1221,8 +1271,53 @@ static int rtl837x_set_ingress_policy(struct rtk_gsw *gsw, int port,
 		return 0;
 	}
 
-	/* Stop admitting tagged frames before membership checking goes away. */
+	if (gsw->tag_proto == DSA_TAG_PROTO_RTL8_4) {
+		/* A VLAN-unaware port must pass 802.1Q frames through as they
+		 * are -- an 8021q upper on a standalone port, a VLAN trunk
+		 * through a VLAN-unaware bridge -- which is what the upstream
+		 * rtl8365mb driver does for the same tag family: membership
+		 * checks off in both directions (transparent egress from this
+		 * port, ingress filtering off), every frame type admitted,
+		 * and egress in exactly the received format (REAL_KEEP: tag
+		 * presence, VID and priority untouched; the user-port egress
+		 * tag mode is otherwise ORIGINAL, which would strip VID 1
+		 * tags through the base VLAN's untag mask). Under rtl8_4 the
+		 * CPU tag carries the source port, so a tagged frame cannot
+		 * forge identity, and the isolation matrix still bounds where
+		 * it can go.
+		 */
+		ret = rtk_vlan_tagMode_set(port, VLAN_EGRESS_TAG_MODE_REAL_KEEP);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		ret = rtl837x_set_transparent(gsw, port, true);
+		if (ret)
+			return ret;
+
+		ret = rtk_vlan_portAcceptFrameType_set(port, ACCEPT_FRAME_TYPE_ALL);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		ret = rtk_vlan_portIgrFilterEnable_set(port, DISABLED);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		return 0;
+	}
+
+	/* tag_8021q: the VID is the port identity, so admit untagged frames
+	 * only. Stop admitting tagged frames before membership checking goes
+	 * away.
+	 */
 	ret = rtk_vlan_portAcceptFrameType_set(port, ACCEPT_FRAME_TYPE_UNTAG_ONLY);
+	if (ret)
+		return rtl837x_to_errno(ret);
+
+	ret = rtl837x_set_transparent(gsw, port, false);
+	if (ret)
+		return ret;
+
+	ret = rtk_vlan_tagMode_set(port, VLAN_EGRESS_TAG_MODE_ORIGINAL);
 	if (ret)
 		return rtl837x_to_errno(ret);
 
@@ -1297,6 +1392,10 @@ static int rtl837x_seed_vlan_table(struct rtk_gsw *gsw)
 		 * priority-tagged (VID 0) frames, so 802.1p clients are
 		 * unaffected. The CPU port must keep accepting tagged frames:
 		 * that is how the tagger addresses a port.
+		 *
+		 * That is the tag_8021q policy. Under rtl8_4 the CPU tag
+		 * carries the port, and a VLAN-unaware port passes tagged
+		 * frames through instead; see rtl837x_set_ingress_policy().
 		 */
 		if (rtl837x_user_port(gsw, port)) {
 			ret = rtl837x_set_ingress_policy(gsw, port, false);
@@ -1455,6 +1554,32 @@ static void rtl837x_conduit_csum_offload(struct dsa_switch *ds, bool enable)
 		 enable ? "enabled" : "disabled", netdev_name(conduit));
 }
 
+/* Bring every per-port setting that depends on the tag protocol in line
+ * with gsw->tag_proto. Caller holds rtnl.
+ */
+static int rtl837x_tag_protocol_resync(struct dsa_switch *ds)
+{
+	struct rtk_gsw *gsw = ds->priv;
+	int port, ret;
+
+	ret = rtl837x_set_transparent(gsw, gsw->cpu_port,
+				      gsw->tag_proto == DSA_TAG_PROTO_RTL8_4);
+	if (ret)
+		return ret;
+
+	for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++) {
+		if (!rtl837x_user_port(gsw, port))
+			continue;
+
+		ret = rtl837x_set_ingress_policy(gsw, port,
+			dsa_port_is_vlan_filtering(dsa_to_port(ds, port)));
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /* Apply the chip-side configuration a tagger needs. Caller holds rtnl. */
 static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 				       enum dsa_tag_protocol proto)
@@ -1535,7 +1660,7 @@ static int rtl837x_tag_protocol_apply(struct dsa_switch *ds,
 
 	gsw->tag_proto = proto;
 
-	return 0;
+	return rtl837x_tag_protocol_resync(ds);
 }
 
 /* Undo whatever rtl837x_tag_protocol_apply() set up. Caller holds rtnl. */
