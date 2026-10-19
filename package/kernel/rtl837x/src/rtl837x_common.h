@@ -184,6 +184,21 @@ struct rtk_gsw {
 	 */
 	u32 base_vlan_only;
 
+	/* MAC_L2_PORT_MAX_LEN_CTRL as the bootloader left it (both speed
+	 * buckets and TAG_INC), read once at setup. port_change_mtu never
+	 * programs less than this: LAN-to-LAN frames are switched in hardware
+	 * without Linux seeing them.
+	 */
+	u32 boot_max_len[RTK_MAX_NUM_OF_PORT][2];
+	u32 boot_tag_inc[RTK_MAX_NUM_OF_PORT];
+	bool boot_max_len_valid;
+
+	/* CPU-port watchdog: set while it holds the conduit closed itself,
+	 * with the user ports that were running when it closed it.
+	 */
+	bool cpu_reset_pending;
+	u32 cpu_reset_users;
+
 	uint16_t flow_control_map; // 流控配置位图
 	bool global_vlan_enable;
 

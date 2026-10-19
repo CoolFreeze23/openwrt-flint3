@@ -678,9 +678,12 @@ static void rtl837x_status_check_work_func(struct work_struct *work)
 		goto reschedule;
 	}
 
+	/* Only this work item touches cpu_reset_pending. */
+	if (port_status.link)
+		gsw->cpu_reset_pending = false;
+
 	if (!port_status.link)
 	{
-		bool was_running[RTK_MAX_NUM_OF_PORT] = {};
 		struct dsa_port *dp;
 
 		if (gsw->cpu_port != UTP_PORT3 && gsw->cpu_port != UTP_PORT8)
@@ -695,7 +698,11 @@ static void rtl837x_status_check_work_func(struct work_struct *work)
 		 * conduit down) drops the SerDes link on purpose: that is not
 		 * a fault to repair, and reopening it would undo the admin.
 		 */
-		if (!(gsw->ethernet_master->flags & IFF_UP)) {
+		/* ...unless this work closed it and failed to reopen it: then
+		 * keep retrying, as the work always did.
+		 */
+		if (!(gsw->ethernet_master->flags & IFF_UP) &&
+		    !gsw->cpu_reset_pending) {
 			rtnl_unlock();
 			goto reschedule;
 		}
@@ -704,11 +711,16 @@ static void rtl837x_status_check_work_func(struct work_struct *work)
 
 		/* Closing the conduit makes DSA close every user port, and
 		 * opening it again does not reopen them: remember which ones
-		 * were running so the LAN does not stay down afterwards.
+		 * were running so the LAN does not stay down afterwards. Kept
+		 * across retries.
 		 */
-		dsa_switch_for_each_user_port(dp, &gsw->ds)
-			if (dp->user && netif_running(dp->user))
-				was_running[dp->index] = true;
+		if (!gsw->cpu_reset_pending) {
+			gsw->cpu_reset_users = 0;
+			dsa_switch_for_each_user_port(dp, &gsw->ds)
+				if (dp->user && netif_running(dp->user))
+					gsw->cpu_reset_users |= BIT(dp->index);
+			gsw->cpu_reset_pending = true;
+		}
 
 		dev_close(gsw->ethernet_master);
 		rtnl_unlock();
@@ -736,9 +748,10 @@ static void rtl837x_status_check_work_func(struct work_struct *work)
 
 		rtnl_lock();
 		if (gsw->ethernet_master->flags & IFF_UP) {
+			gsw->cpu_reset_pending = false;
 			dsa_switch_for_each_user_port(dp, &gsw->ds) {
-				if (!was_running[dp->index] || !dp->user ||
-				    netif_running(dp->user))
+				if (!(gsw->cpu_reset_users & BIT(dp->index)) ||
+				    !dp->user || netif_running(dp->user))
 					continue;
 
 				ret = dev_open(dp->user, NULL);
