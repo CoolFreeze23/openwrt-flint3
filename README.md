@@ -57,7 +57,8 @@ Throughput measured between two units over a 2.5G trunk: **~1.8–1.9 Gbit/s**.
   down; the cause of the crash itself is still open. Reported upstream.
 - **Kernel panic in netlink socket release**, seen six times since August on
   both APs after hours of uptime (sockets of a bridge notification, hostapd
-  or wsdd2). The AP reboots itself in ~90 s. wsdd2 is kept disabled as one
+  or wsdd2). The AP reboots itself in ~90 s (the panic log is kept, see
+  [Crash logs](#crash-logs)). wsdd2 is kept disabled as one
   trigger; root cause under investigation with a KASAN kernel.
 - **Client kicks for "excessive missing ACKs"**: the driver's packet-loss
   events are unreliable for multi-link stations, so hostapd's
@@ -132,6 +133,65 @@ factory-image path instead (see [issue #9](https://github.com/perceival/openwrt-
 
 **Back up your eMMC first** — the ART partition holds this unit's radio
 calibration and MAC addresses and cannot be recovered from anywhere else.
+
+## Recovery
+
+From least to most invasive:
+
+1. **Settings broken, system boots:** hold the reset button for more than
+   5 seconds while OpenWrt is running and release it. That is a factory reset
+   (`firstboot`), and the unit comes back at 192.168.1.1.
+2. **System does not finish booting:** failsafe. Power on and watch the white
+   LED. While it blinks during early boot, press reset briefly, and it switches
+   to a fast blink. Connect a PC with a static 192.168.1.2/24 to **LAN1** and
+   run `ssh root@192.168.1.1`. Then `mount_root` to get at the configuration,
+   or `firstboot -y && reboot`.
+3. **No kernel at all (bad flash):** the U-Boot recovery server. Power off,
+   hold reset, power on and keep holding for about 5 seconds. A web server
+   then answers at 192.168.1.1 (PC on 192.168.1.2/24). Upload a **stock GL.iNet
+   firmware** (`be9300-<version>.bin` from https://dl.gl-inet.com/router/be9300/),
+   let it flash and reboot into stock, and then reinstall OpenWrt from stock as
+   described above. The same server also has upload forms that write U-Boot
+   itself and the `0:ART` partition, with no authentication or check. Never use
+   those: ART holds this unit's calibration and MACs.
+
+What the recovery server does with *non-stock* images is GL's own code (the
+Qualcomm U-Boot it is based on has no web server), and GL ships no U-Boot in
+its firmware images, so it can only be read from a unit's bootloader:
+
+- `…-squashfs-factory.bin` carries the same U-Boot script as GL's images
+  (`flashinit mmc; flupdate set mmc; imxtract … hlos && flash 0:HLOS;
+  imxtract … rootfs && flash rootfs; flupdate clear`; in Qualcomm's U-Boot
+  `flupdate` only selects the flash type). If the server runs it, the image
+  is flashed. That is reported from the bootloader in PR #114, not tested.
+- the `…-initramfs-uImage.itb` is **not** flashed. The server reports "HTTP
+  ugrade is done" but the eMMC is unchanged. The image is left in RAM at
+  0x50000000, where `bootm 0x50000000` from the serial console can start it
+  (see the device page). This is what the device page measured, and it
+  matches the PR's analysis of the `.itb`.
+- `…-squashfs-sysupgrade.bin` is rejected.
+
+For a guaranteed result, use a stock image there.
+
+## Crash logs
+
+A kernel panic reboots the unit after `kernel.panic` (3 s). If the panic path
+hangs instead, the watchdog bites at most 5 s later. The ~90 s until a
+crashed AP answers again is mostly the normal boot: U-Boot, kernel, and
+loading the Wi-Fi firmware for three radios.
+
+The kernel log of the crash survives that reboot in RAM (ramoops, 1 MiB
+reserved at 0x4da00000). On the next boot `/etc/init.d/save-pstore` copies
+it to `/root/pstore/NNNN-<date>/` (`dmesg-ramoops-*` is the panic,
+`console-ramoops-*` the console of the crashed boot) and keeps the last 10
+crashes. `/root/pstore` is kept across sysupgrades that keep settings. A
+power cut, or pulling the plug instead of waiting for the reboot, loses the
+RAM copy.
+
+U-Boot only collects its own crash dump (and waits for "any key within
+10s") when the download-mode cookie in TCSR (0x193D100, bit 4) is set. Linux
+clears it at boot (`qcom_scm.download_mode=off`, the default), so a panic
+reboots straight into a normal boot.
 
 ## Other boards
 
