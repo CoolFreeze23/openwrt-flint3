@@ -8,8 +8,51 @@ glinet_get_fit_part() {
 		sed -n "s/^[[:space:]]*Image \([0-9][0-9]*\) ($name)$/\1/p"
 }
 
+# A sysupgrade tar is written by emmc_upgrade_tar(), which dd's its kernel
+# into 0:HLOS without any check. Refuse, before anything is written, a tar
+# that would leave the unit unbootable: no kernel (the old kernel would boot
+# the new rootfs and its modules), a kernel larger than 0:HLOS (truncated),
+# or a kernel FIT without the "config-1" configuration stock U-Boot asks for
+# ("Config not available", e.g. an image built from an older tree).
+glinet_emmc_check_tar() {
+	local image="$1"
+	local kernel=/tmp/glinet-check-kernel.bin
+	local gz board_dir size limit hlos_dev ret=1
+
+	[ "$(identify_magic_long "$(get_magic_long "$image" cat)")" = "gzip" ] && gz=z
+	board_dir=$(tar t${gz}f "$image" 2>/dev/null | grep -m 1 '^sysupgrade-.*/$')
+	board_dir=${board_dir%/}
+	[ -n "$board_dir" ] || {
+		v "Not a sysupgrade image or a factory/stock FIT image."
+		return 1
+	}
+
+	rm -f "$kernel"
+	tar x${gz}f "$image" "$board_dir/kernel" -O > "$kernel" 2>/dev/null
+	size=$(wc -c < "$kernel" 2>/dev/null)
+	hlos_dev=$(find_mmc_part "0:HLOS")
+	limit=$(( $(cat "/sys/class/block/${hlos_dev##*/}/size" 2>/dev/null || echo 0) * 512 ))
+
+	if [ "${size:-0}" -eq 0 ]; then
+		v "The sysupgrade image has no kernel."
+	elif [ -z "$hlos_dev" ] || [ "$size" -gt "$limit" ]; then
+		v "The kernel ($size bytes) does not fit 0:HLOS ($limit bytes)."
+	elif command -v dumpimage >/dev/null &&
+	     ! dumpimage -l "$kernel" 2>/dev/null | grep -q "^ *Configuration [0-9]* (config-1)$"; then
+		v "The kernel has no FIT configuration \"config-1\"; stock U-Boot cannot boot it."
+	else
+		ret=0
+	fi
+
+	rm -f "$kernel"
+	return $ret
+}
+
 glinet_emmc_check_image() {
-	[ "$(identify_magic_long "$(get_magic_long "$1")")" != "fit" ] && return 0
+	[ "$(identify_magic_long "$(get_magic_long "$1")")" != "fit" ] && {
+		glinet_emmc_check_tar "$1"
+		return
+	}
 
 	local hlos=$(glinet_get_fit_part "$1" hlos)
 	local rootfs=$(glinet_get_fit_part "$1" rootfs)
