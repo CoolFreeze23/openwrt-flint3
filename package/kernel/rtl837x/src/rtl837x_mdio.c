@@ -1168,6 +1168,11 @@ static void rtl837x_dsa_remove(struct mdio_device *mdiodev)
 	if (!gsw)
 		return;
 
+#ifdef CONFIG_GPIOLIB
+	/* Before anything below clears the global state it relies on. */
+	rtl837x_gpiochip_exit(gsw);
+#endif /* CONFIG_GPIOLIB */
+
 	cancel_delayed_work_sync(&gsw->status_check_work);
 	if (gsw->sfp_bus)
 		sfp_bus_del_upstream(gsw->sfp_bus);

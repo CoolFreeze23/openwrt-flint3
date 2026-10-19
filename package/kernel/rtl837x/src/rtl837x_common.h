@@ -49,6 +49,8 @@
 			gsw->sds1mode = (_mode);                        \
 	} while (0)
 
+struct gpio_chip;
+
 struct rtl837x_mib_counter {
 	uint16_t	base;
 	const char	*name;
@@ -153,6 +155,7 @@ struct rtk_gsw {
 	bool mirror_ingress;
 	struct net_device *ethernet_master;
 	struct sfp_bus *sfp_bus;
+	struct gpio_chip *gpio_chip;
 
 	struct rtl837x_mib_counter *mib_counters;
 	unsigned int num_mib_counters;
@@ -212,6 +215,7 @@ extern int rtl837x_dsa_register(struct rtk_gsw *gsw);
 extern void rtl837x_dsa_unregister(struct rtk_gsw *gsw);
 extern void rtl837x_dsa_shutdown(struct rtk_gsw *gsw);
 extern int rtl837x_gpiochip_init(struct rtk_gsw *gsw);
+extern void rtl837x_gpiochip_exit(struct rtk_gsw *gsw);
 
 unsigned int mii_mgr_read(unsigned int phy_addr, 
 		unsigned int phy_register, unsigned int *read_data);
