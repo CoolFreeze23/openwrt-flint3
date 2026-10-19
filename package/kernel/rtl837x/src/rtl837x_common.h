@@ -193,6 +193,18 @@ struct rtk_gsw {
 
 extern int rtl8372n_hw_init(struct rtk_gsw *gsw, rtl837x_pnswap_cfg_t swap_cfg);
 
+/* Serializes the SDK's multi-register indirect transactions -- the MIB
+ * counter engine, the ITA VLAN/LUT table engine, LUT flushes, indirect PHY
+ * and SerDes access -- each of which is a command/poll/data sequence that
+ * the per-register regmap lock does not cover (RTK_API_LOCK() is empty in
+ * the kernel build). The SDK is reached from RTNL, from DSA's FDB workqueue
+ * (no RTNL), from phylib, from stats_work and the CPU-port work, and from
+ * debugfs. Hold it around one SDK call at a time, never across a callback
+ * or while taking another lock; the order is rtnl / phylib -> this ->
+ * regmap map_lock -> MDIO bus lock.
+ */
+extern struct mutex rtl837x_ind_lock;
+
 extern int rtl837x_debug_proc_init(struct rtk_gsw *gsw);
 extern int rtl837x_debug_proc_deinit(struct rtk_gsw *gsw);
 

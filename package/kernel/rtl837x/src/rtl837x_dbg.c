@@ -60,7 +60,9 @@ ssize_t _sdsreg_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EFAULT;
 			}
+			mutex_lock(&rtl837x_ind_lock);
 			ret = rtk_rtl8373_sds_reg_write(sds_id, page, reg, val);
+			mutex_unlock(&rtl837x_ind_lock);
 			if (ret) {
 				kfree(buf);
 				return -EIO;
@@ -75,7 +77,9 @@ ssize_t _sdsreg_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EFAULT;
 			}
+			mutex_lock(&rtl837x_ind_lock);
 			ret = rtk_rtl8373_sds_reg_read(sds_id, page, reg, &val);
+			mutex_unlock(&rtl837x_ind_lock);
 			if (ret) {
 				kfree(buf);
 				return -EIO;
@@ -110,7 +114,9 @@ ssize_t _phyreg_mmd_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EFAULT;
 			}
+			mutex_lock(&rtl837x_ind_lock);
 			ret = rtk_port_phyReg_set(1 << port, devad, reg, val);
+			mutex_unlock(&rtl837x_ind_lock);
 			if (ret) {
 				kfree(buf);
 				return -EIO;
@@ -125,7 +131,9 @@ ssize_t _phyreg_mmd_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EFAULT;
 			}
+			mutex_lock(&rtl837x_ind_lock);
 			ret = rtk_port_phyReg_get(port, devad, reg, &val);
+			mutex_unlock(&rtl837x_ind_lock);
 			if (ret) {
 				kfree(buf);
 				return -EIO;
@@ -160,7 +168,9 @@ ssize_t _reg_rw_write(struct file *filep, const char __user *ubuf,
 			kfree(buf);
 			return -EFAULT;
 		} else {
+			mutex_lock(&rtl837x_ind_lock);
 			ret = rtk_rtl8373_setAsicReg(reg, val);
+			mutex_unlock(&rtl837x_ind_lock);
 			if (ret) {
 				kfree(buf);
 				return -EIO;
@@ -171,7 +181,9 @@ ssize_t _reg_rw_write(struct file *filep, const char __user *ubuf,
 			kfree(buf);
 			return -EFAULT;
 		} else {
+			mutex_lock(&rtl837x_ind_lock);
 			ret = rtk_rtl8373_getAsicReg(reg, &val);
+			mutex_unlock(&rtl837x_ind_lock);
 			if (ret) {
 				kfree(buf);
 				return -EIO;
@@ -197,6 +209,7 @@ static ssize_t _sds_page_dump_read(struct file *filep, char __user *ubuf,
 	if (!buf)
 		return -ENOMEM;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_rtl8373_getAsicReg(RTL8373_SDS_MODE_SEL_ADDR, &v3);
 	if (ret)
 		goto out_error;
@@ -283,10 +296,12 @@ static ssize_t _sds_page_dump_read(struct file *filep, char __user *ubuf,
 		goto out_error;
 	len += snprintf(buf + len, 4096 - len, "sds page 5  reg 1; bit7:0 = %#x\n", v3);
 
+	mutex_unlock(&rtl837x_ind_lock);
 	ret = simple_read_from_buffer(ubuf, count, offp, buf, len);
 	goto out;
 
 out_error:
+	mutex_unlock(&rtl837x_ind_lock);
 	ret = -EIO;
 
 out:

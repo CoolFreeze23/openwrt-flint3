@@ -75,6 +75,9 @@ static void rtl837x_mdio_teardown(struct dsa_switch *ds);
 static DEFINE_MUTEX(rtl837x_phy_driver_lock);
 static unsigned int rtl837x_phy_driver_users;
 
+/* See rtl837x_common.h. */
+DEFINE_MUTEX(rtl837x_ind_lock);
+
 static bool rtl837x_valid_port(struct rtk_gsw *gsw, int port)
 {
 	return port >= 0 && port < RTK_MAX_NUM_OF_PORT &&
@@ -710,7 +713,9 @@ static int rtl837x_read_ethtool_stat(int port, rtk_stat_port_type_t counter,
 	rtk_stat_counter_t counter_value = 0;
 	int ret;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_stat_port_get(port, counter, &counter_value);
+	mutex_unlock(&rtl837x_ind_lock);
 	if (ret)
 		return rtl837x_to_errno(ret);
 
@@ -1239,7 +1244,9 @@ static int rtl837x_write_vlan(struct rtk_gsw *gsw, u16 vid)
 	vlan.svlan_chk_ivl_svl = 0;
 	vlan.ivl_svl = 1;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_vlan_set(vid, &vlan);
+	mutex_unlock(&rtl837x_ind_lock);
 	return rtl837x_to_errno(ret);
 }
 
@@ -1869,7 +1876,9 @@ static int rtl837x_mdio_read_c45(struct mii_bus *bus, int port, int devad,
 	if (!rtl837x_user_port(gsw, port))
 		return -EOPNOTSUPP;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_port_phyReg_get(port, devad, regnum, &value);
+	mutex_unlock(&rtl837x_ind_lock);
 	/* MDIO bus probing treats negative reads as fatal bus errors. */
 	if (ret)
 		return 0xffff;
@@ -1886,7 +1895,9 @@ static int rtl837x_mdio_write_c45(struct mii_bus *bus, int port, int devad,
 	if (!rtl837x_user_port(gsw, port))
 		return -EOPNOTSUPP;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_port_phyReg_set(BIT(port), devad, regnum, val);
+	mutex_unlock(&rtl837x_ind_lock);
 	return rtl837x_to_errno(ret);
 }
 
@@ -2360,7 +2371,9 @@ static void rtl837x_port_fast_age(struct dsa_switch *ds, int port)
 	cfg.flushStaticAddr = DISABLED;
 	cfg.flushAddrOnAllPorts = DISABLED;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_l2_ucastAddr_flush(&cfg);
+	mutex_unlock(&rtl837x_ind_lock);
 	if (ret)
 		dev_err(gsw->dev, "failed to flush FDB for port %d: %d\n", port,
 			ret);
@@ -2401,7 +2414,9 @@ static int rtl837x_port_vlan_fast_age(struct dsa_switch *ds, int port, u16 vid)
 	cfg.flushStaticAddr = DISABLED;
 	cfg.flushAddrOnAllPorts = DISABLED;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_l2_ucastAddr_flush(&cfg);
+	mutex_unlock(&rtl837x_ind_lock);
 	return rtl837x_to_errno(ret);
 }
 
@@ -2691,7 +2706,9 @@ static int rtl837x_port_fdb_add(struct dsa_switch *ds, int port,
 	l2.auth = 1;
 	l2.is_static = 1;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_l2_addr_add(&mac, &l2);
+	mutex_unlock(&rtl837x_ind_lock);
 	return rtl837x_to_errno(ret);
 }
 
@@ -2722,7 +2739,9 @@ static int rtl837x_port_fdb_del(struct dsa_switch *ds, int port,
 	l2.port = port;
 	l2.is_static = 1;
 
+	mutex_lock(&rtl837x_ind_lock);
 	ret = rtk_l2_addr_del(&mac, &l2);
+	mutex_unlock(&rtl837x_ind_lock);
 	if (ret == RT_ERR_L2_ENTRY_NOTFOUND)
 		return 0;
 
@@ -2744,8 +2763,11 @@ static int rtl837x_port_fdb_dump(struct dsa_switch *ds, int port,
 		rtk_l2_ucastAddr_t l2 = { 0 };
 		u16 vid;
 
+		/* Per entry, never across the netlink callback below. */
+		mutex_lock(&rtl837x_ind_lock);
 		ret = rtk_l2_addr_next_get(READMETHOD_NEXT_L2UCSPA, port,
 					   &address, &l2);
+		mutex_unlock(&rtl837x_ind_lock);
 		if (ret == RT_ERR_L2_ENTRY_NOTFOUND)
 			break;
 		if (ret != RT_ERR_OK)
