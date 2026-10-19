@@ -7,6 +7,7 @@
 #include <linux/etherdevice.h>
 #include <linux/if_bridge.h>
 #include <linux/if_ether.h>
+#include <linux/if_vlan.h>
 #include <linux/kernel.h>
 #include <linux/phylink.h>
 #include <linux/phy.h>
@@ -20,6 +21,7 @@
 #include "./rtk-api/l2.h"
 #include "./rtk-api/mirror.h"
 #include "./rtk-api/dal/rtl8373/dal_rtl8373_stp.h"
+#include "./rtk-api/dal/rtl8373/dal_rtl8373_port.h"
 
 /* Base VLAN of standalone and VLAN-unaware ports under rtl8_4, see
  * rtl837x_base_vlan_join().
@@ -85,6 +87,9 @@ static int rtl837x_devlink_info_get(struct dsa_switch *ds,
 }
 
 static int rtl837x_mdio_setup(struct dsa_switch *ds);
+static int rtl837x_open_tx_max_len(struct rtk_gsw *gsw);
+static int rtl837x_port_change_mtu(struct dsa_switch *ds, int port,
+				   int new_mtu);
 static void rtl837x_mdio_teardown(struct dsa_switch *ds);
 
 static DEFINE_MUTEX(rtl837x_phy_driver_lock);
@@ -2000,6 +2005,15 @@ static int rtl837x_setup(struct dsa_switch *ds)
 	if (ret)
 		return ret;
 
+	ret = rtl837x_open_tx_max_len(gsw);
+	if (ret)
+		return ret;
+
+	/* DSA only programs the CPU port when the conduit MTU changes. */
+	ret = rtl837x_port_change_mtu(ds, gsw->cpu_port, ETH_DATA_LEN);
+	if (ret)
+		return ret;
+
 	ret = rtk_stat_global_reset();
 	if (ret)
 		return rtl837x_to_errno(ret);
@@ -3078,6 +3092,89 @@ static int rtl837x_port_fdb_dump(struct dsa_switch *ds, int port,
 	return 0;
 }
 
+/* Maximum frame length.
+ *
+ * MAC_L2_PORT_MAX_LEN_CTRL (0x1250 + port * 0x100) is the per-port RX limit:
+ * two 14-bit fields, one for 10/100M and one for 1G and faster links, plus
+ * MAX_LEN_TAG_INC, which decides whether CPU, C- and S-tags count towards
+ * the limit (dal_rtl8373_portMaxLenIncTag_set()). With TAG_INC clear the
+ * limit describes the frame without tags, so neither the rtl8_4 CPU tag, a
+ * tag_8021q VID nor a user's 802.1Q tag eats into the MTU. The VLAN_HLEN
+ * in the overhead is deliberate slack: it gives the conventional 1522 at the
+ * default MTU and absorbs any FCS accounting difference.
+ *
+ * MAC_L2_PORT_TX_MAX_LEN_CTRL (0x4E90 + port * 4) is a separate egress
+ * limit without an SDK accessor. Linux has no egress MTU for switch ports
+ * (the RX limit of the ingress port is the MTU check), so it is opened to
+ * the field maximum once at setup instead of being left to whatever the
+ * bootloader programmed, which would otherwise silently drop jumbo frames
+ * between ports.
+ */
+#define RTL837X_MAX_FRAME_LEN	0x3FFF
+#define RTL837X_FRAME_OVERHEAD	(ETH_HLEN + VLAN_HLEN + ETH_FCS_LEN)
+
+static int rtl837x_open_tx_max_len(struct rtk_gsw *gsw)
+{
+	int port, ret;
+
+	for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++) {
+		if (!rtl837x_valid_port(gsw, port))
+			continue;
+
+		ret = rtl8373_setAsicRegBits(RTL8373_MAC_L2_PORT_TX_MAX_LEN_CTRL_ADDR(port),
+			RTL8373_MAC_L2_PORT_TX_MAX_LEN_CTRL_MAX_LEN_TX_100M_10M_SEL_MASK,
+			RTL837X_MAX_FRAME_LEN);
+		if (ret)
+			return rtl837x_to_errno(ret);
+
+		ret = rtl8373_setAsicRegBits(RTL8373_MAC_L2_PORT_TX_MAX_LEN_CTRL_ADDR(port),
+			RTL8373_MAC_L2_PORT_TX_MAX_LEN_CTRL_MAX_LEN_TX_1G_2P5G_5G_10G_SEL_MASK,
+			RTL837X_MAX_FRAME_LEN);
+		if (ret)
+			return rtl837x_to_errno(ret);
+	}
+
+	return 0;
+}
+
+static int rtl837x_port_max_mtu(struct dsa_switch *ds, int port)
+{
+	return RTL837X_MAX_FRAME_LEN - RTL837X_FRAME_OVERHEAD;
+}
+
+static int rtl837x_port_change_mtu(struct dsa_switch *ds, int port,
+				   int new_mtu)
+{
+	struct rtk_gsw *gsw = ds->priv;
+	u32 len;
+	int ret;
+
+	if (!rtl837x_valid_port(gsw, port) || new_mtu < ETH_MIN_MTU ||
+	    new_mtu > rtl837x_port_max_mtu(ds, port))
+		return -EINVAL;
+
+	/* The CPU port's ingress is the conduit's egress, already sized by
+	 * the conduit MTU; it gets the largest length the field allows, so
+	 * that how the CPU tag is accounted for on that link cannot matter.
+	 */
+	if (port == gsw->cpu_port)
+		len = RTL837X_MAX_FRAME_LEN;
+	else
+		len = new_mtu + RTL837X_FRAME_OVERHEAD;
+
+	ret = dal_rtl8373_portMaxLenIncTag_set(port, 0);
+	if (ret)
+		return rtl837x_to_errno(ret);
+
+	/* Both speed buckets: a port can renegotiate between them. */
+	ret = dal_rtl8373_portMaxLen_set(port, 0, len);
+	if (ret)
+		return rtl837x_to_errno(ret);
+
+	ret = dal_rtl8373_portMaxLen_set(port, 1, len);
+	return rtl837x_to_errno(ret);
+}
+
 static const struct dsa_switch_ops rtl837x_dsa_ops = {
 	.get_tag_protocol = rtl837x_get_tag_protocol,
 	.change_tag_protocol = rtl837x_change_tag_protocol,
@@ -3110,6 +3207,8 @@ static const struct dsa_switch_ops rtl837x_dsa_ops = {
 	.port_fdb_add = rtl837x_port_fdb_add,
 	.port_fdb_del = rtl837x_port_fdb_del,
 	.port_fdb_dump = rtl837x_port_fdb_dump,
+	.port_change_mtu = rtl837x_port_change_mtu,
+	.port_max_mtu = rtl837x_port_max_mtu,
 	.port_mirror_add = rtl837x_port_mirror_add,
 	.port_mirror_del = rtl837x_port_mirror_del,
 	.tag_8021q_vlan_add = rtl837x_tag_8021q_vlan_add,
@@ -3135,6 +3234,10 @@ int rtl837x_dsa_register(struct rtk_gsw *gsw)
 	ds->max_num_bridges = DSA_TAG_8021Q_MAX_NUM_BRIDGES;
 	ds->ageing_time_min = 14000;
 	ds->ageing_time_max = 800000;
+	/* The MTU is an RX length limit per port (rtl837x_port_change_mtu());
+	 * have DSA keep the ports of a bridge at a common MTU.
+	 */
+	ds->mtu_enforcement_ingress = true;
 
 	ret = dsa_register_switch(ds);
 	if (ret)
