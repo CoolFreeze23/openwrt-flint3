@@ -1253,6 +1253,7 @@ static int rtl837x_seed_vlan_table(struct rtk_gsw *gsw)
 	int port, ret;
 
 	memset(gsw->vlan_table, 0, sizeof(gsw->vlan_table));
+	gsw->base_vlan_only = rtl837x_user_ports(gsw);
 
 	gsw->vlan_table[1].valid = 1;
 	gsw->vlan_table[1].vid = 1;
@@ -1307,6 +1308,100 @@ static int rtl837x_seed_vlan_table(struct rtk_gsw *gsw)
 	}
 
 	return 0;
+}
+
+/* Under rtl8_4, VID 1 is also the base VLAN every standalone or VLAN-unaware
+ * user port classifies into (rtl837x_commit_pvid_for_mode() falls back to
+ * it), so such a port -- and with it the CPU port -- has to stay a member
+ * whatever the bridge does with its own default VID 1. The bridge deletes
+ * that VID from every port it releases (nbp_vlan_flush() runs before DSA's
+ * bridge leave), which used to leave the port classifying into a VLAN it was
+ * no longer a member of; once the last port had left, the CPU port was
+ * dropped as well and standalone RX died before reaching the CPU. The port
+ * isolation matrix keeps the members apart. base_vlan_only records the ports
+ * that are members only because of this rule, so that a VLAN-aware bridge
+ * does not inherit the membership.
+ */
+#define RTL837X_BASE_VID 1
+
+static bool rtl837x_uses_base_vlan(struct rtk_gsw *gsw, int port)
+{
+	return gsw->tag_proto == DSA_TAG_PROTO_RTL8_4 &&
+	       rtl837x_user_port(gsw, port) &&
+	       !dsa_port_is_vlan_filtering(dsa_to_port(&gsw->ds, port));
+}
+
+/* Does any user port in VID 1 classify into it as the base VLAN? */
+static bool rtl837x_base_vlan_in_use(struct rtk_gsw *gsw)
+{
+	unsigned long mbr = gsw->vlan_table[RTL837X_BASE_VID].mbr &
+			    rtl837x_user_ports(gsw);
+	int port;
+
+	if (gsw->tag_proto != DSA_TAG_PROTO_RTL8_4)
+		return false;
+
+	for_each_set_bit(port, &mbr, RTK_MAX_NUM_OF_PORT)
+		if ((gsw->base_vlan_only & BIT(port)) ||
+		    rtl837x_uses_base_vlan(gsw, port))
+			return true;
+
+	return false;
+}
+
+static int rtl837x_base_vlan_join(struct rtk_gsw *gsw, int port)
+{
+	typeof(gsw->vlan_table[0]) old_vlan = gsw->vlan_table[RTL837X_BASE_VID];
+	u32 old_only = gsw->base_vlan_only;
+	int ret;
+
+	if (old_vlan.valid && (old_vlan.mbr & BIT(port)))
+		return 0;
+
+	gsw->vlan_table[RTL837X_BASE_VID].valid = 1;
+	gsw->vlan_table[RTL837X_BASE_VID].vid = RTL837X_BASE_VID;
+	gsw->vlan_table[RTL837X_BASE_VID].mbr |= BIT(port) | BIT(gsw->cpu_port);
+	gsw->vlan_table[RTL837X_BASE_VID].untag |= BIT(port);
+	gsw->base_vlan_only |= BIT(port);
+
+	ret = rtl837x_write_vlan(gsw, RTL837X_BASE_VID);
+	if (ret) {
+		gsw->vlan_table[RTL837X_BASE_VID] = old_vlan;
+		gsw->base_vlan_only = old_only;
+	}
+
+	return ret;
+}
+
+static int rtl837x_base_vlan_leave(struct rtk_gsw *gsw, int port)
+{
+	typeof(gsw->vlan_table[0]) old_vlan = gsw->vlan_table[RTL837X_BASE_VID];
+	u32 old_only = gsw->base_vlan_only;
+	int ret;
+
+	if (!(gsw->base_vlan_only & BIT(port)))
+		return 0;
+
+	gsw->base_vlan_only &= ~BIT(port);
+	if (!old_vlan.valid)
+		return 0;
+
+	gsw->vlan_table[RTL837X_BASE_VID].mbr &= ~BIT(port);
+	gsw->vlan_table[RTL837X_BASE_VID].untag &= ~BIT(port);
+	if (!rtl837x_vlan_has_user(gsw, RTL837X_BASE_VID)) {
+		gsw->vlan_table[RTL837X_BASE_VID].mbr &= ~BIT(gsw->cpu_port);
+		gsw->vlan_table[RTL837X_BASE_VID].untag &= ~BIT(gsw->cpu_port);
+	}
+	if (!gsw->vlan_table[RTL837X_BASE_VID].mbr)
+		gsw->vlan_table[RTL837X_BASE_VID].valid = 0;
+
+	ret = rtl837x_write_vlan(gsw, RTL837X_BASE_VID);
+	if (ret) {
+		gsw->vlan_table[RTL837X_BASE_VID] = old_vlan;
+		gsw->base_vlan_only = old_only;
+	}
+
+	return ret;
 }
 
 /* Turn the conduit's checksum offloads on or off.
@@ -2379,21 +2474,30 @@ static int rtl837x_apply_vlan_mode(struct rtk_gsw *gsw, int port,
 		if (ret)
 			return ret;
 
-		ret = rtl837x_bridge_vid_member(gsw, port, false);
+		/* tag_8021q leaves its bridge VID; rtl8_4 leaves the base
+		 * VLAN unless the bridge itself configured VID 1 here.
+		 */
+		if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q)
+			ret = rtl837x_bridge_vid_member(gsw, port, false);
+		else
+			ret = rtl837x_base_vlan_leave(gsw, port);
 		if (ret)
 			return ret;
 
 		return rtl837x_set_ingress_policy(gsw, port, true);
 	}
 
-	/* Stop admitting tagged frames first, then rejoin the bridge VID and
-	 * classify into it again.
+	/* Stop admitting tagged frames first, then rejoin the bridge VID (or
+	 * under rtl8_4 the base VLAN) and classify into it again.
 	 */
 	ret = rtl837x_set_ingress_policy(gsw, port, false);
 	if (ret)
 		return ret;
 
-	ret = rtl837x_bridge_vid_member(gsw, port, true);
+	if (gsw->tag_proto == DSA_TAG_PROTO_VSC73XX_8021Q)
+		ret = rtl837x_bridge_vid_member(gsw, port, true);
+	else
+		ret = rtl837x_base_vlan_join(gsw, port);
 	if (ret)
 		return ret;
 
@@ -2471,6 +2575,10 @@ static int rtl837x_port_vlan_add(struct dsa_switch *ds, int port,
 		return ret;
 	}
 
+	/* The bridge now owns this port's VID 1 membership. */
+	if (vid == RTL837X_BASE_VID)
+		gsw->base_vlan_only &= ~BIT(port);
+
 	if (pvid && port != gsw->cpu_port) {
 		u16 old_pvid = gsw->bridge_pvid[port];
 		bool old_pvid_valid = gsw->bridge_pvid_valid[port];
@@ -2502,14 +2610,29 @@ static int rtl837x_port_vlan_del(struct dsa_switch *ds, int port,
 	if (!vid || vid > RTK_VID_MAX || !gsw->vlan_table[vid].valid)
 		return 0;
 
+	if (vid == RTL837X_BASE_VID && rtl837x_uses_base_vlan(gsw, port)) {
+		/* A VLAN-unaware or departing bridge port stays in the base
+		 * VLAN; only the bridge's claim on it goes away.
+		 */
+		gsw->base_vlan_only |= BIT(port);
+		goto pvid;
+	}
+
 	old_vlan = gsw->vlan_table[vid];
 
 	gsw->vlan_table[vid].mbr &= ~BIT(port);
 	gsw->vlan_table[vid].untag &= ~BIT(port);
 
+	/* The CPU port leaves a VLAN once no user port is in it. Under rtl8_4
+	 * that also holds when DSA drops the bridge's own (host) VID 1 while
+	 * standalone ports still classify into the base VLAN.
+	 */
 	if (!rtl837x_vlan_has_user(gsw, vid)) {
 		gsw->vlan_table[vid].mbr &= ~BIT(gsw->cpu_port);
 		gsw->vlan_table[vid].untag &= ~BIT(gsw->cpu_port);
+	} else if (vid == RTL837X_BASE_VID && port == gsw->cpu_port &&
+		   rtl837x_base_vlan_in_use(gsw)) {
+		gsw->vlan_table[vid].mbr |= BIT(gsw->cpu_port);
 	}
 
 	if (!gsw->vlan_table[vid].mbr)
@@ -2521,6 +2644,7 @@ static int rtl837x_port_vlan_del(struct dsa_switch *ds, int port,
 		return ret;
 	}
 
+pvid:
 	if (port != gsw->cpu_port && gsw->bridge_pvid_valid[port] &&
 	    gsw->bridge_pvid[port] == vid) {
 		u16 old_pvid = gsw->bridge_pvid[port];

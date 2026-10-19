@@ -175,6 +175,12 @@ struct rtk_gsw {
 	uint16_t bridge_pvid[RTK_MAX_NUM_OF_PORT];
 	bool bridge_pvid_valid[RTK_MAX_NUM_OF_PORT];
 
+	/* rtl8_4: user ports that are members of the base VLAN 1 only because
+	 * they are standalone or in a VLAN-unaware bridge, not because a
+	 * bridge configured VID 1 on them. See rtl837x_base_vlan_join().
+	 */
+	u32 base_vlan_only;
+
 	uint16_t flow_control_map; // 流控配置位图
 	bool global_vlan_enable;
 
