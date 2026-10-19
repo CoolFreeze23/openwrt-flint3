@@ -69,6 +69,28 @@ Throughput measured between two units over a 2.5G trunk: **~1.8–1.9 Gbit/s**.
 - **802.11r is incompatible with MLO.** hostapd's FT code has no MLD
   awareness — do not enable 11r on an MLO SSID. 11k/11v are fine.
 
+## Testing the stock 2.4 GHz board file
+
+The image uses 2.4 GHz board data that is known to work with this firmware. It
+also carries an unused test copy, `/lib/firmware/ath12k-test/ath12k/IPQ5332/hw1.0/board-2.bin`,
+with the board file that GL's own firmware loads for this board (stock 4.10.1
+`bdwlan.b12`), which has not yet been tried with the ath12k firmware. To try it
+until the next reboot:
+
+```sh
+wifi down
+echo -n /lib/firmware/ath12k-test > /sys/module/firmware_class/parameters/path
+rmmod ath12k_wifi7 ath12k
+modprobe ath12k && modprobe ath12k_wifi7
+sleep 30; wifi up
+```
+
+Then check that the 2.4 GHz network comes up (`iwinfo`, and `dmesg | grep ath12k`
+shows no board-data or firmware errors), and compare `iw dev <2.4 GHz interface> info`
+(txpower) and 2.4 GHz throughput with the normal file. Nothing is changed on
+flash: if Wi-Fi does not come back, just reboot and the normal board file is
+used again. Please report the result in the issue tracker.
+
 ## Building
 
 ```sh
