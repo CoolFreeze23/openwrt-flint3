@@ -173,6 +173,36 @@ its firmware images, so it can only be read from a unit's bootloader:
 
 For a guaranteed result, use a stock image there.
 
+### U-Boot environment (`fw_printenv`)
+
+The images set up `fw_env.config` for the GL-BE9300 with stock's layout:
+`0:APPSBLENV` at offset 0, 256 KiB, the environment size of Qualcomm's
+U-Boot for IPQ5332. It was checked on a unit running stock 4.10.1, where
+`0:APPSBLENV` is 256 KiB, stock's own `/etc/fw_env.config` reads
+`/dev/mmcblk0p6 0x0 0x40000`, and `fw_printenv` shows no "Bad CRC" warning.
+To repeat the check on your own unit, run this **while it still runs
+stock**:
+
+```sh
+cat /etc/fw_env.config      # must read: /dev/mmcblk0p6 0x0 0x40000
+fw_printenv >/dev/null      # must print no "Bad CRC" warning
+```
+
+The entry is only created on a fresh install (or after
+`/etc/config/ubootenv` is removed); a keep-settings upgrade from an older
+build keeps its empty configuration. To add it by hand on a running unit:
+
+```sh
+echo "$(. /lib/functions.sh; find_mmc_part 0:APPSBLENV) 0x0 0x40000" > /etc/fw_env.config
+fw_printenv >/dev/null      # again: no "Bad CRC"
+```
+
+**Never run `fw_setenv` after `fw_printenv` has warned "Bad CRC, using
+default environment".** `fw_setenv` would then write the tools' generic
+default environment (`bootcmd=run distro_bootcmd`) with a valid CRC, and
+this U-Boot would no longer boot the firmware. Remove `/etc/fw_env.config`
+instead and report the output of the stock check above.
+
 ## Crash logs
 
 A kernel panic reboots the unit after `kernel.panic` (3 s). If the panic path
