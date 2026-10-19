@@ -13,10 +13,21 @@ glinet_emmc_check_image() {
 
 	local hlos=$(glinet_get_fit_part "$1" hlos)
 	local rootfs=$(glinet_get_fit_part "$1" rootfs)
-	[ -n "$hlos" ] && [ -n "$rootfs" ] && return 0
+	[ -n "$hlos" ] && [ -n "$rootfs" ] || {
+		v "The factory image must contain hlos and rootfs sections."
+		return 1
+	}
 
-	v "The factory image must contain hlos and rootfs sections."
-	return 1
+	# The FIT path writes whole partitions and has nowhere to put a config
+	# backup (emmc_copy_config only works after the sysupgrade-tar path), so
+	# "keep settings" would be dropped silently. Say so up front.
+	type notify_firmware_no_backup >/dev/null 2>&1 && notify_firmware_no_backup
+	[ "$SAVE_CONFIG" = 1 ] && {
+		v "Factory and stock images cannot keep settings; use sysupgrade -n."
+		return 1
+	}
+
+	return 0
 }
 
 glinet_emmc_staged() {
