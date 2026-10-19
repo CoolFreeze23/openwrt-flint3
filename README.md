@@ -105,9 +105,21 @@ are on the device page:
 **https://openwrt.org/toh/gl.inet/gl-be9300**
 
 Short version: from stock firmware, use the **factory** image with
-`sysupgrade -F -n`. The stock image check requires a QSDK FIT, so `-F` is
-required and the "missing section" warnings for `u-boot`/`tz`/`sb11` are
-expected. Do **not** force the plain sysupgrade image from stock.
+`sysupgrade -F -n`. `-F` is required because stock does not recognise the
+image's board name (see below); the "missing section" warnings for
+`u-boot`/`tz`/`sb11` are expected. Do **not** force the plain sysupgrade
+image from stock.
+
+`-n` is **required**, not optional. Without it, stock's own
+`platform_copy_config` formats an ext4 filesystem inside the `rootfs`
+partition and copies GL's configuration into it, where OpenWrt can pick it
+up as its overlay. If the file is not a QSDK FIT (for example the sysupgrade
+image forced by mistake), it formats from offset 0 and destroys the stock
+rootfs, and only U-Boot recovery brings the unit back. Check the image's
+`sha256sum` against the build's `sha256sums` file before forcing it.
+
+Back to stock from OpenWrt: `sysupgrade -n be9300-<version>.bin` (no `-F`
+needed; `-n` is required here too).
 
 Stock QSDK firmware may report `qcom,ipq5332-ap-mi01.6` as its board name.
 That is the generic Qualcomm MI01.6/RDP468 identity used by the vendor path,
