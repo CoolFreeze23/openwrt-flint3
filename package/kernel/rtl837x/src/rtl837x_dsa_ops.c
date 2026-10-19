@@ -2269,6 +2269,58 @@ static void rtl837x_phy_driver_put(void)
 	mutex_unlock(&rtl837x_phy_driver_lock);
 }
 
+/* Bind every PHY on the slave bus to rtl837x_phy_driver.
+ *
+ * The bus scan in mdiobus_register() binds each PHY to the first registered
+ * driver that matches it, in driver registration order. The built-in
+ * REALTEK_PHY driver is registered long before this module, and its
+ * ID-matched entries (RTL8224, 0x001ccad0, and the other 2.5G Realtek IDs)
+ * can match the internal PHYs, so which driver ended up in charge depended
+ * on what the PHYs report as their ID rather than on this driver. Those
+ * drivers program the PHY through registers of a discrete chip, which on
+ * this bus are indirect accesses into the switch; the private driver
+ * reads link state from the switch MAC instead.
+ *
+ * device_driver_attach() binds a specific driver to a specific device; it is
+ * the same operation as writing the device to the driver's sysfs "bind"
+ * file. Done before DSA connects the user ports, so no phylink instance
+ * has seen the foreign driver yet.
+ */
+static int rtl837x_phy_bind_private(struct rtk_gsw *gsw, struct mii_bus *bus)
+{
+	struct device_driver *drv = &rtl837x_phy_driver.mdiodrv.driver;
+	int addr, ret;
+
+	for (addr = 0; addr < PHY_MAX_ADDR; addr++) {
+		struct phy_device *phydev = mdiobus_get_phy(bus, addr);
+		struct device *dev;
+
+		if (!phydev)
+			continue;
+
+		dev = &phydev->mdio.dev;
+		if (dev->driver == drv)
+			continue;
+
+		if (dev->driver) {
+			dev_info(gsw->dev,
+				 "port %d: PHY 0x%08x was bound to \"%s\", rebinding to \"%s\"\n",
+				 addr, phydev->phy_id, dev->driver->name, drv->name);
+			device_release_driver(dev);
+		}
+
+		ret = device_driver_attach(drv, dev);
+		if (ret) {
+			dev_err(gsw->dev,
+				"port %d: failed to bind \"%s\": %d\n",
+				addr, drv->name, ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
 static int rtl837x_mdio_setup(struct dsa_switch *ds)
 {
 	struct rtk_gsw *gsw = ds->priv;
@@ -2308,6 +2360,15 @@ static int rtl837x_mdio_setup(struct dsa_switch *ds)
 	ret = mdiobus_register(bus);
 	if (ret) {
 		dev_err(gsw->dev, "failed to register slave MDIO bus: %d\n", ret);
+		mdiobus_free(bus);
+		ds->user_mii_bus = NULL;
+		rtl837x_phy_driver_put();
+		return ret;
+	}
+
+	ret = rtl837x_phy_bind_private(gsw, bus);
+	if (ret) {
+		mdiobus_unregister(bus);
 		mdiobus_free(bus);
 		ds->user_mii_bus = NULL;
 		rtl837x_phy_driver_put();
