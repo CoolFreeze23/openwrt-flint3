@@ -681,15 +681,36 @@ static void rtl837x_status_check_work_func(struct work_struct *work)
 
 	if (!port_status.link)
 	{
+		bool was_running[RTK_MAX_NUM_OF_PORT] = {};
+		struct dsa_port *dp;
+
 		if (gsw->cpu_port != UTP_PORT3 && gsw->cpu_port != UTP_PORT8)
 		{
 			dev_warn(gsw->dev, "CPU Port Down, But the CPU port is not Serdes Port, Skip Reset and stop CPU port check work\n");
 			return;
 		}
 
-		dev_info(gsw->dev, "CPU Port Down, Try to reset Serdes, mode: 0x%x\n", gsw->sds0mode);
-
 		rtnl_lock();
+		/* A conduit the administrator took down (for instance to
+		 * change the tag protocol, which DSA only allows with the
+		 * conduit down) drops the SerDes link on purpose: that is not
+		 * a fault to repair, and reopening it would undo the admin.
+		 */
+		if (!(gsw->ethernet_master->flags & IFF_UP)) {
+			rtnl_unlock();
+			goto reschedule;
+		}
+
+		dev_warn(gsw->dev, "CPU Port Down, Try to reset Serdes, mode: 0x%x\n", gsw->sds0mode);
+
+		/* Closing the conduit makes DSA close every user port, and
+		 * opening it again does not reopen them: remember which ones
+		 * were running so the LAN does not stay down afterwards.
+		 */
+		dsa_switch_for_each_user_port(dp, &gsw->ds)
+			if (dp->user && netif_running(dp->user))
+				was_running[dp->index] = true;
+
 		dev_close(gsw->ethernet_master);
 		rtnl_unlock();
 		ret = rtk_sdsMode_set(0, SERDES_OFF);
@@ -709,6 +730,22 @@ static void rtl837x_status_check_work_func(struct work_struct *work)
 		if (ret)
 			dev_warn_ratelimited(gsw->dev,
 					     "failed to restore CPU SerDes mode: %d\n", ret);
+
+		rtnl_lock();
+		if (gsw->ethernet_master->flags & IFF_UP) {
+			dsa_switch_for_each_user_port(dp, &gsw->ds) {
+				if (!was_running[dp->index] || !dp->user ||
+				    netif_running(dp->user))
+					continue;
+
+				ret = dev_open(dp->user, NULL);
+				if (ret)
+					dev_warn(gsw->dev,
+						 "failed to reopen %s after CPU SerDes reset: %d\n",
+						 netdev_name(dp->user), ret);
+			}
+		}
+		rtnl_unlock();
 
 		msleep(2000);
 	}
