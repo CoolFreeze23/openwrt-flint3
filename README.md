@@ -206,9 +206,12 @@ instead and report the output of the stock check above.
 ## Crash logs
 
 A kernel panic reboots the unit after `kernel.panic` (3 s). If the panic path
-hangs instead, the watchdog bites at most 5 s later. The ~90 s until a
-crashed AP answers again is mostly the normal boot: U-Boot, kernel, and
-loading the Wi-Fi firmware for three radios.
+hangs instead, the watchdog bites at most 5 s later. Why a crashed AP takes
+~90 s to answer again cannot be settled from source. Probably most of it is
+the normal boot (U-Boot, kernel, and loading the Wi-Fi firmware for three
+radios), but a panic path that hangs until a watchdog bite would look the
+same from outside. The timestamps in the saved crash logs, or a serial
+console, will tell.
 
 The kernel log of the crash survives that reboot in RAM (ramoops, 1 MiB
 reserved at 0x4da00000). On the next boot `/etc/init.d/save-pstore` copies
