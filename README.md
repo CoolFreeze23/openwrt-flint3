@@ -216,10 +216,15 @@ console, will tell.
 The kernel log of the crash survives that reboot in RAM (ramoops, 1 MiB
 reserved at 0x4da00000). On the next boot `/etc/init.d/save-pstore` copies
 it to `/root/pstore/NNNN-<date>/` (`dmesg-ramoops-*` is the panic,
-`console-ramoops-*` the console of the crashed boot) and keeps the last 10
-crashes. `/root/pstore` is kept across sysupgrades that keep settings. A
-power cut, or pulling the plug instead of waiting for the reboot, loses the
-RAM copy.
+`console-ramoops-*` the console of the crashed boot), keeps the last 10
+crashes, and says so in the kernel log (`dmesg | grep pstore`, also in
+`logread`). The RAM copy is only cleared once every record has been copied
+to the flash-backed overlay, synced and compared with the original. If the
+overlay is not on flash (it fell back to tmpfs, for example because the
+crash damaged it) or a copy fails, the records stay in `/sys/fs/pstore` and
+can be copied by hand. `/root/pstore` is kept across sysupgrades that keep
+settings. A power cut, or pulling the plug instead of waiting for the
+reboot, loses the RAM copy.
 
 U-Boot only collects its own crash dump (and waits for "any key within
 10s") when the download-mode cookie in TCSR (0x193D100, bit 4) is set. Linux
