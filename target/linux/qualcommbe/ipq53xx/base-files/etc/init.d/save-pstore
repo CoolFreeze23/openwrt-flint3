@@ -1,0 +1,49 @@
+#!/bin/sh /etc/rc.common
+# ramoops (DTS reserved-memory "ramoops@4da00000") keeps the kernel log of a
+# panic or oops in RAM across the reset; /etc/init.d/boot mounts it at
+# /sys/fs/pstore. That is still RAM: the next crash or a power cut loses it.
+# When the last boot ended in a crash, copy every record to flash, so a panic
+# that happens unattended can still be read afterwards, then remove the
+# records from pstore to free its slots for the next crash.
+
+START=11
+
+PSTORE=/sys/fs/pstore
+DEST=/root/pstore
+KEEP=10
+
+boot() {
+	local f dir n count
+
+	# console-ramoops is the previous boot's console and exists after every
+	# reboot; only a dmesg record means the last boot crashed.
+	ls "$PSTORE"/dmesg-* >/dev/null 2>&1 || return 0
+
+	mkdir -p "$DEST" || return 1
+	# Sequence number first: the clock may not be set this early.
+	n=$(ls -1 "$DEST" | sort | tail -n 1)
+	n=$(expr "${n%%-*}" + 1 2>/dev/null) || n=1
+	dir="$DEST/$(printf %04d "$n")-$(date +%Y%m%d-%H%M%S)"
+	mkdir -p "$dir" || return 1
+
+	count=0
+	for f in "$PSTORE"/*; do
+		[ -f "$f" ] || continue
+		cp "$f" "$dir/" && count=$((count + 1))
+	done
+	sync
+
+	# Only clear pstore once the copies are on flash.
+	[ "$count" -gt 0 ] && rm -f "$PSTORE"/*
+
+	logger -t pstore -p kern.warn \
+		"previous boot crashed: saved $count pstore record(s) to $dir"
+
+	# Keep the newest $KEEP crashes.
+	n=$(ls -1 "$DEST" | wc -l)
+	for f in $(ls -1 "$DEST" | sort); do
+		[ "$n" -gt "$KEEP" ] || break
+		rm -rf "${DEST:?}/$f"
+		n=$((n - 1))
+	done
+}
