@@ -2379,7 +2379,8 @@ static void rtl837x_port_fast_age(struct dsa_switch *ds, int port)
 			ret);
 }
 
-static int rtl837x_fdb_vid(u16 vid, struct dsa_db db, u16 *fdb_vid)
+static int rtl837x_fdb_vid(struct rtk_gsw *gsw, u16 vid, struct dsa_db db,
+			   u16 *fdb_vid)
 {
 	if (vid) {
 		*fdb_vid = vid;
@@ -2388,10 +2389,17 @@ static int rtl837x_fdb_vid(u16 vid, struct dsa_db db, u16 *fdb_vid)
 
 	switch (db.type) {
 	case DSA_DB_PORT:
-		*fdb_vid = dsa_tag_8021q_standalone_vid(db.dp);
-		return 0;
 	case DSA_DB_BRIDGE:
-		*fdb_vid = dsa_tag_8021q_bridge_vid(db.bridge.num);
+		/* Under rtl8_4 there are no tag_8021q VIDs: standalone ports
+		 * and VLAN-unaware bridges classify into the base VLAN, so
+		 * that is where the switch looks entries up.
+		 */
+		if (gsw->tag_proto == DSA_TAG_PROTO_RTL8_4)
+			*fdb_vid = RTL837X_BASE_VID;
+		else if (db.type == DSA_DB_PORT)
+			*fdb_vid = dsa_tag_8021q_standalone_vid(db.dp);
+		else
+			*fdb_vid = dsa_tag_8021q_bridge_vid(db.bridge.num);
 		return 0;
 	default:
 		return -EOPNOTSUPP;
@@ -2694,7 +2702,7 @@ static int rtl837x_port_fdb_add(struct dsa_switch *ds, int port,
 	if (gsw->chip_id == CHIP_RTL8372N && port == gsw->cpu_port)
 		return 0;
 
-	ret = rtl837x_fdb_vid(vid, db, &fdb_vid);
+	ret = rtl837x_fdb_vid(gsw, vid, db, &fdb_vid);
 	if (ret)
 		return ret;
 
@@ -2728,7 +2736,7 @@ static int rtl837x_port_fdb_del(struct dsa_switch *ds, int port,
 	if (gsw->chip_id == CHIP_RTL8372N && port == gsw->cpu_port)
 		return 0;
 
-	ret = rtl837x_fdb_vid(vid, db, &fdb_vid);
+	ret = rtl837x_fdb_vid(gsw, vid, db, &fdb_vid);
 	if (ret)
 		return ret;
 
@@ -2783,6 +2791,11 @@ static int rtl837x_port_fdb_dump(struct dsa_switch *ds, int port,
 		 */
 		vid = l2.ivl ? l2.vid_fid : 0;
 		if (vid_is_dsa_8021q(vid))
+			vid = 0;
+		/* Likewise the rtl8_4 base VLAN of an unaware port. */
+		if (vid == RTL837X_BASE_VID &&
+		    gsw->tag_proto == DSA_TAG_PROTO_RTL8_4 &&
+		    !dsa_port_is_vlan_filtering(dsa_to_port(ds, port)))
 			vid = 0;
 
 		ret = cb(l2.mac.octet, vid, l2.is_static, data);
