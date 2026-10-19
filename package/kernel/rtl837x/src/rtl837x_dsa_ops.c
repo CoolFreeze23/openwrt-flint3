@@ -361,27 +361,6 @@ static int rtl837x_set_mac_eee(struct dsa_switch *ds, int port,
 	return 0;
 }
 
-/* With tag_8021q, forwarding and isolation are governed entirely by VLAN
- * membership (standalone per-port VIDs isolate; shared bridge VIDs bridge).
- * Keep the hardware port-isolation matrix fully permissive so VLAN egress
- * filtering is the sole gate.
- */
-static int rtl837x_open_isolation(struct rtk_gsw *gsw)
-{
-	int port, ret;
-
-	for (port = 0; port < RTK_MAX_NUM_OF_PORT; port++) {
-		if (!rtl837x_valid_port(gsw, port))
-			continue;
-
-		ret = rtk_port_isolation_set(port, gsw->valid_port_mask);
-		if (ret)
-			return rtl837x_to_errno(ret);
-	}
-
-	return 0;
-}
-
 struct rtl837x_isolation_update {
 	u32 old_mask;
 	u32 new_mask;
@@ -398,17 +377,30 @@ rtl837x_bridge_dev_for_port(struct rtk_gsw *gsw, int port, int changed_port,
 	return gsw->bridge_dev[port];
 }
 
+/* Egress permit mask for @port, derived from bridge membership.
+ *
+ * Under the rtl8_4 tagger every standalone port and every VLAN-unaware
+ * bridge classifies into the same base VLAN 1, so this matrix is the only
+ * thing keeping standalone ports apart from each other and one bridge apart
+ * from another: a user port may reach the CPU, itself (hairpin is gated
+ * separately by localPktPermit) and the other members of its own bridge,
+ * minus the BR_ISOLATED pairs. Under tag_8021q the per-port and per-bridge
+ * VIDs already separate them and this is a second, redundant gate.
+ */
 static u32 rtl837x_isolation_mask_for_port(struct rtk_gsw *gsw, int port,
 					   u32 isolated_port_mask,
 					   int changed_port,
 					   struct net_device *changed_bridge_dev)
 {
 	struct net_device *bridge_dev;
-	u32 mask = gsw->valid_port_mask;
+	u32 mask;
 	int other;
 
-	if (!(isolated_port_mask & BIT(port)))
-		return mask;
+	/* The CPU port must be able to reach every port. */
+	if (!rtl837x_user_port(gsw, port))
+		return gsw->valid_port_mask;
+
+	mask = BIT(gsw->cpu_port) | BIT(port);
 
 	bridge_dev = rtl837x_bridge_dev_for_port(gsw, port, changed_port,
 						 changed_bridge_dev);
@@ -418,17 +410,21 @@ static u32 rtl837x_isolation_mask_for_port(struct rtk_gsw *gsw, int port,
 	for (other = 0; other < RTK_MAX_NUM_OF_PORT; other++) {
 		struct net_device *other_bridge_dev;
 
-		if (other == port || !rtl837x_valid_port(gsw, other))
-			continue;
-
-		if (!(isolated_port_mask & BIT(other)))
+		if (other == port || !rtl837x_user_port(gsw, other))
 			continue;
 
 		other_bridge_dev = rtl837x_bridge_dev_for_port(gsw, other,
 								changed_port,
 								changed_bridge_dev);
-		if (other_bridge_dev == bridge_dev)
-			mask &= ~BIT(other);
+		if (other_bridge_dev != bridge_dev)
+			continue;
+
+		/* BR_ISOLATED: two isolated ports of one bridge stay apart. */
+		if ((isolated_port_mask & BIT(port)) &&
+		    (isolated_port_mask & BIT(other)))
+			continue;
+
+		mask |= BIT(other);
 	}
 
 	return mask;
@@ -1722,7 +1718,10 @@ static int rtl837x_setup(struct dsa_switch *ds)
 			return ret;
 	}
 
-	ret = rtl837x_open_isolation(gsw);
+	/* bridge_dev[] and isolated_port_mask were cleared above, so every
+	 * user port starts out reaching only the CPU port.
+	 */
+	ret = rtl837x_apply_isolation(gsw, 0, -1, NULL);
 	if (ret)
 		return ret;
 
