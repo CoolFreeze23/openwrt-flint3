@@ -19,8 +19,11 @@
 
 #define TO_FOPS(name) _##name##_rw_fops
 
+/* Large enough for the longest usage line below (65 bytes + NUL). */
+#define RTL837X_DBG_BUF_LEN 128
+
 #define REGRWFUNC(name) \
-	static char _buf_rd_##name[64];  \
+	static char _buf_rd_##name[RTL837X_DBG_BUF_LEN];  \
 	static ssize_t _##name##_rw_read(struct file *filep, char __user *ubuf,  \
 				  size_t count, loff_t *offp)   \
 	{   \
@@ -84,10 +87,10 @@ ssize_t _sdsreg_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EIO;
 			}
-			snprintf(_buf_rd_sdsreg, 64, "sds_id: %d, page: 0x%08x, reg: 0x%08x, val: 0x%08x\n", sds_id, page, reg, val);
+			snprintf(_buf_rd_sdsreg, sizeof(_buf_rd_sdsreg), "sds_id: %d, page: 0x%08x, reg: 0x%08x, val: 0x%08x\n", sds_id, page, reg, val);
 		}
 	} else {
-		snprintf(_buf_rd_sdsreg, 64, "echo \"w/r <sds_id> <page> <reg> [<val>]\" > sdsreg\n");
+		snprintf(_buf_rd_sdsreg, sizeof(_buf_rd_sdsreg), "echo \"w/r <sds_id> <page> <reg> [<val>]\" > sdsreg\n");
 	}
 	kfree(buf);
 	return count;
@@ -138,10 +141,10 @@ ssize_t _phyreg_mmd_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EIO;
 			}
-			snprintf(_buf_rd_phyreg_mmd, 64, "port: %d, devad: 0x%08x, reg: 0x%08x, val: 0x%08x\n", port, devad, reg, val);
+			snprintf(_buf_rd_phyreg_mmd, sizeof(_buf_rd_phyreg_mmd), "port: %d, devad: 0x%08x, reg: 0x%08x, val: 0x%08x\n", port, devad, reg, val);
 		}
 	} else {
-		snprintf(_buf_rd_phyreg_mmd, 64, "echo \"w/r <real_port_index> <devad> <reg> [<val>]\" > phyreg_mmd\n");
+		snprintf(_buf_rd_phyreg_mmd, sizeof(_buf_rd_phyreg_mmd), "echo \"w/r <real_port_index> <devad> <reg> [<val>]\" > phyreg_mmd\n");
 	}
 	kfree(buf);
 	return count;
@@ -188,10 +191,10 @@ ssize_t _reg_rw_write(struct file *filep, const char __user *ubuf,
 				kfree(buf);
 				return -EIO;
 			}
-			snprintf(_buf_rd_reg, 64, "reg: 0x%08x, val: 0x%08x\n", reg, val);
+			snprintf(_buf_rd_reg, sizeof(_buf_rd_reg), "reg: 0x%08x, val: 0x%08x\n", reg, val);
 		}
 	} else {
-		snprintf(_buf_rd_reg, 64, "echo \"w/r <reg> [<val>]\" > reg\n");
+		snprintf(_buf_rd_reg, sizeof(_buf_rd_reg), "echo \"w/r <reg> [<val>]\" > reg\n");
 	}
 	kfree(buf);
 	return count;
