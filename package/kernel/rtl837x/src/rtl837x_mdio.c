@@ -25,12 +25,12 @@
 
 #include <linux/printk.h>
 
-const uint8_t rtl8373_port_map[16] = {
+static const uint8_t rtl8373_port_map[16] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, // 物理端口0-8
     0, 0, 0, 0, 0, 0, 0        // 填充
 };
 
-const uint8_t rtl8372_port_map[16] = {
+static const uint8_t rtl8372_port_map[16] = {
     3, 4, 5, 6, 7, 8, // 物理端口3-8
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0 // 填充
 };
@@ -253,6 +253,8 @@ static char* chipid_to_chip_name(switch_chip_t id)
 static int rtl837x_switch_probe(struct rtk_gsw *gsw)
 {
 	switch_chip_t sw_chip;
+	rtk_uint32 regValue;
+	rtk_api_ret_t ret;
 
 	for(int i = 0;; i++)
 	{
@@ -290,9 +292,6 @@ static int rtl837x_switch_probe(struct rtk_gsw *gsw)
 
 CHIP_NOT_SUPPORTED:
 	//未知芯片ID
-	rtk_uint32 regValue;
-	rtk_api_ret_t ret;
-
 	ret = rtl8373_getAsicReg(0x4, &regValue);
 	if (ret != RT_ERR_OK) {
 		dev_err(gsw->dev,
