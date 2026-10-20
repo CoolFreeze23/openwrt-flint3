@@ -821,13 +821,19 @@ static int rtl837x_set_stp_state(struct rtk_gsw *gsw, int port, u8 state)
 
 	/* The MSTP state table is indexed by FID (RTL8373_MSPT_STATE_ADDR(),
 	 * range-checked against RTL8373_FIDMAX), and VLAN-unaware ports look
-	 * up in their port-based FID. DSA has a single STP state per port,
-	 * so program it into every instance.
+	 * up in their port-based FID. DSA has a single STP state per port.
+	 * Only per_bridge_fid puts ports in FIDs other than 0, so only then
+	 * program every instance; otherwise keep the original single write to
+	 * instance 0.
 	 */
-	for (msti = 0; msti <= RTL8373_MSTIMAX; msti++) {
+	for (msti = 0; msti <= (rtl837x_per_bridge_fid(gsw) ? RTL8373_MSTIMAX : 0);
+	     msti++) {
 		ret = dal_rtl8373_asicMstpPortStatus_set(msti, port, mstp_state);
-		if (ret)
+		if (ret) {
+			dev_dbg(gsw->dev, "MSTI %u: STP state %u on port %d: %d\n",
+				msti, state, port, ret);
 			return rtl837x_to_errno(ret);
+		}
 	}
 
 	return 0;
