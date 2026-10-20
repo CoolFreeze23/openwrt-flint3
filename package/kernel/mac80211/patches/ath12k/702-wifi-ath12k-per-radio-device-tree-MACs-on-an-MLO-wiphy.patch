@@ -1,0 +1,149 @@
+From: CoolFreeze23 <34906576+CoolFreeze23@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 03:00:00 +0900
+Subject: [PATCH] wifi: ath12k: per-radio device tree MACs on an MLO wiphy
+
+With a device tree MAC (701), each radio of a device takes the device
+address with its fifth byte bumped by the pdev index. On a dual-MAC
+QCN9274 whose node holds ART@0x4 + 1, the 6 GHz radio becomes
+xx:xx:xx:xx:(b4+1):xx, an address in another unit's range. Give the
+radios the addresses that follow the device address instead, as the
+vendor driver does (stock GL-BE9300: wifi0/1/2 = ART@0x4 + 0/1/2).
+
+On a multi-radio (MLO) wiphy userspace sees one permanent address, so
+wifi-scripts derives the interface addresses of every radio from radio
+0's: the first AP of radio N becomes base + 16 * N, again a global
+address another unit owns. When every radio of the wiphy has a device
+tree address, publish the per-radio addresses as wiphy->addresses:
+wifi-scripts (common.uc macaddr_generate()) already takes radio N's base
+from entry N of /sys/class/ieee80211/phy*/addresses (0-based).
+
+Devices without a device tree address keep the firmware address and
+the old derivation. The list is published only when every radio's
+address is from the device tree and all are distinct.
+
+Log the device tree address, and a failure to read one other than "no
+address in the node", so the source of the MAC shows in dmesg.
+---
+diff --git a/drivers/net/wireless/ath/ath12k/core.c b/drivers/net/wireless/ath/ath12k/core.c
+--- a/drivers/net/wireless/ath/ath12k/core.c
++++ b/drivers/net/wireless/ath/ath12k/core.c
+@@ -1215,15 +1215,26 @@ err_mlo_teardown:
+ static void ath12k_core_get_mac_address(struct ath12k_base *ab)
+ {
+ 	u8 mac_addr[ETH_ALEN];
++	int ret;
++
++	ab->mac_addr_from_dt = false;
+ 
+ 	if (!ab->dev->of_node)
+ 		return;
+ 
+-	if (of_get_mac_address(ab->dev->of_node, mac_addr))
++	ret = of_get_mac_address(ab->dev->of_node, mac_addr);
++	if (ret) {
++		/* -ENOENT/-ENODEV: the node has no address, which is fine */
++		if (ret != -ENOENT && ret != -ENODEV)
++			ath12k_warn(ab, "failed to read MAC address from device tree: %d, using %pM from firmware\n",
++				    ret, ab->mac_addr);
+ 		return;
++	}
+ 
+ 	ether_addr_copy(ab->mac_addr, mac_addr);
+ 	ab->pdevs_macaddr_valid = false;
++	ab->mac_addr_from_dt = true;
++	ath12k_info(ab, "MAC address %pM from device tree\n", ab->mac_addr);
+ }
+ 
+ static int ath12k_core_hw_group_start(struct ath12k_hw_group *ag)
+diff --git a/drivers/net/wireless/ath/ath12k/core.h b/drivers/net/wireless/ath/ath12k/core.h
+--- a/drivers/net/wireless/ath/ath12k/core.h
++++ b/drivers/net/wireless/ath/ath12k/core.h
+@@ -837,6 +837,9 @@ struct ath12k_hw {
+ 
+ 	struct ath12k_dp_hw dp_hw;
+ 
++	/* per-radio addresses published as wiphy->addresses */
++	struct mac_address radio_addrs[ATH12K_GROUP_MAX_RADIO];
++
+ 	/* Keep last */
+ 	struct ath12k radio[] __aligned(sizeof(void *));
+ };
+@@ -1071,6 +1074,8 @@ struct ath12k_base {
+ 	struct ath12k_wmi_target_cap_arg target_caps;
+ 	u32 ext_service_bitmap[WMI_SERVICE_EXT_BM_SIZE];
+ 	bool pdevs_macaddr_valid;
++	/* mac_addr came from the device tree, not from firmware */
++	bool mac_addr_from_dt;
+ 
+ 	const struct ath12k_hw_params *hw_params;
+ 
+diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/ath12k/mac.c
+--- a/drivers/net/wireless/ath/ath12k/mac.c
++++ b/drivers/net/wireless/ath/ath12k/mac.c
+@@ -15067,6 +15067,43 @@ static int ath12k_mac_setup_register(str
+ 	return 0;
+ }
+ 
++/* A multi-radio (MLO) wiphy shows userspace a single permanent address, so
++ * every interface address is derived from radio 0's base, whatever radio it
++ * runs on. When each radio has its own device tree address, publish them as
++ * wiphy->addresses in radio order: cfg80211 lists them in
++ * /sys/class/ieee80211/phyN/addresses, which is where wifi-scripts takes the
++ * base address of radio N from. cfg80211 refuses a permanent address other
++ * than the first entry, so set that too (radio 0 is pdev 0 of its device, so
++ * this is the address it already had).
++ */
++static void ath12k_mac_hw_set_radio_addrs(struct ath12k_hw *ah)
++{
++	struct wiphy *wiphy = ah->hw->wiphy;
++	struct ath12k *ar;
++	int i, j;
++
++	wiphy->addresses = NULL;
++	wiphy->n_addresses = 0;
++
++	if (ah->num_radio < 2)
++		return;
++
++	for_each_ar(ah, ar, i) {
++		if (!ar->ab->mac_addr_from_dt)
++			return;
++
++		for (j = 0; j < i; j++)
++			if (ether_addr_equal(ah->radio_addrs[j].addr, ar->mac_addr))
++				return;
++
++		ether_addr_copy(ah->radio_addrs[i].addr, ar->mac_addr);
++	}
++
++	wiphy->addresses = ah->radio_addrs;
++	wiphy->n_addresses = ah->num_radio;
++	ether_addr_copy(wiphy->perm_addr, ah->radio_addrs[0].addr);
++}
++
+ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+ {
+ 	struct ieee80211_hw *hw = ah->hw;
+@@ -15100,6 +15137,14 @@ static int ath12k_mac_hw_register(struct
+ 		pdev = ar->pdev;
+ 		if (ar->ab->pdevs_macaddr_valid) {
+ 			ether_addr_copy(ar->mac_addr, pdev->mac_addr);
++		} else if (ar->ab->mac_addr_from_dt) {
++			/* A device tree address is the device's own base: its
++			 * radios take the addresses that follow it, as the
++			 * vendor driver does, not a fifth-byte bump into an
++			 * address range that belongs to another unit.
++			 */
++			ether_addr_copy(ar->mac_addr, ar->ab->mac_addr);
++			eth_addr_add(ar->mac_addr, ar->pdev_idx);
+ 		} else {
+ 			ether_addr_copy(ar->mac_addr, ar->ab->mac_addr);
+ 			ar->mac_addr[4] += ar->pdev_idx;
+@@ -15145,6 +15190,7 @@ static int ath12k_mac_hw_register(struct
+ 	wiphy->available_antennas_tx = antennas_tx;
+ 
+ 	SET_IEEE80211_PERM_ADDR(hw, mac_addr);
++	ath12k_mac_hw_set_radio_addrs(ah);
+ 	SET_IEEE80211_DEV(hw, ab->dev);
+ 
+ 	ret = ath12k_mac_setup_iface_combinations(ah);
